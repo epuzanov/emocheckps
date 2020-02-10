@@ -6,7 +6,7 @@
     This script is a PowerShell implementation of EmoCheck (https://github.com/JPCERTCC/EmoCheck)
 
 .NOTES
-    Version            : 1.0.0
+    Version            : 1.0.1
     Author             : Egor Puzanov
     Created on         : 2020-02-09
     License            : MIT License
@@ -111,22 +111,37 @@ Process {
 
     foreach($HostName in $ComputerName) {
         $status.ComputerName = $HostName
-        if ($parameters.ContainsKey("ComputerName")) {
-            $parameters.ComputerName = $status.ComputerName
-        }
-        $status.VolumeSerialNumber = (Invoke-Command @parameters { Get-CimInstance -ClassName Win32_Volume -Filter "name='C:\\'" }).SerialNumber
-        $status.EmotetProcessName = $(Get-EmotetProcessName $status.VolumeSerialNumber)
-        $process = (Invoke-Command @parameters { Get-CimInstance -ClassName Win32_Process -Filter "Name like '$($status.EmotetProcessName)%'" })
-        if ($process) {
-            $status.EmotetProcessID = $process.Handle
-            $status.EmotetPath = $process.ExecutablePath
-            $status.Status = "DETECTED"
+        $status.EmotetProcessID = $null
+        $status.EmotetPath = $null
+        $status.Status = "UNKNOWN"
+        if ($status.ComputerName -eq "localhost") {
+            $parameters.Remove("ComputerName")
         } else {
-            $status.EmotetProcessID = $null
-            $status.EmotetPath = $null
-            $status.Status = "OK"
+            $parameters.ComputerName = $status.ComputerName
+            try {
+                if (-Not $(Test-Connection $status.ComputerName -count 1 -Quiet)) {
+                    $status.Status = "OFFLINE"
+                }
+            } catch {
+            }
         }
-        return $status
+        if ($status.Status -ne "OFFLINE") {
+            try {
+                $status.VolumeSerialNumber = (Invoke-Command @parameters { Get-CimInstance -ClassName Win32_Volume -Filter "name='C:\\'" }).SerialNumber
+                $status.EmotetProcessName = $(Get-EmotetProcessName $status.VolumeSerialNumber)
+                $process = (Invoke-Command @parameters { Get-CimInstance -ClassName Win32_Process -Filter "Name like '$($status.EmotetProcessName)%'" })
+                if ($process) {
+                    $status.EmotetProcessID = $process.Handle
+                    $status.EmotetPath = $process.ExecutablePath
+                    $status.Status = "DETECTED"
+                } else {
+                    $status.Status = "OK"
+                }
+            } catch {
+                $status.Status = "UNKNOWN"
+            }
+        }
+        $status
     }
 }
 

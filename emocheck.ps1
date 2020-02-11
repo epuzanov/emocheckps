@@ -6,7 +6,7 @@
     This script is a PowerShell implementation of EmoCheck (https://github.com/JPCERTCC/EmoCheck)
 
 .NOTES
-    Version            : 1.0.1
+    Version            : 1.0.2
     Author             : Egor Puzanov
     Created on         : 2020-02-09
     License            : MIT License
@@ -37,6 +37,14 @@
     ------------ ------
     host1        DETECTED
     host2        OK
+
+.EXAMPLE
+    PS> Get-ADComputer -Filter 'Name -like "dc*"' | Select Name | ./emocheck.ps1 | Select-Object -Property ComputerName,Status | Export-Csv -Path .\result.csv -NoTypeInformation
+    PS> Get-Content -Path .\result.csv
+    "ComputerName","Status"
+    "dc001.domain.net","OK"
+    "dc002.domain.net","OK"
+    "dc003.domain.net","OK"
 
 .LINK
     https://github.com/epuzanov/emocheckps
@@ -70,13 +78,6 @@ Param (
 
 Begin {
     $keywords = "duck,mfidl,targets,ptr,khmer,purge,metrics,acc,inet,msra,symbol,driver,sidebar,restore,msg,volume,cards,shext,query,roam,etw,mexico,basic,url,createa,blb,pal,cors,send,devices,radio,bid,format,thrd,taskmgr,timeout,vmd,ctl,bta,shlp,avi,exce,dbt,pfx,rtp,edge,mult,clr,wmistr,ellipse,vol,cyan,ses,guid,wce,wmp,dvb,elem,channel,space,digital,pdeft,violet,thunk"
-    $parameters = @{}
-    if ($ComputerName -ne "localhost") {
-        $parameters.ComputerName = $null
-    }
-    if ($Credential) {
-        $parameters.Credential = $Credential
-    }
     $status = New-Object PSObject
     $status | Add-Member NoteProperty ComputerName $null
     $status | Add-Member NoteProperty VolumeSerialNumber $null
@@ -113,32 +114,29 @@ Process {
         $status.ComputerName = $HostName
         $status.EmotetProcessID = $null
         $status.EmotetPath = $null
-        $status.Status = "UNKNOWN"
-        if ($status.ComputerName -eq "localhost") {
-            $parameters.Remove("ComputerName")
-        } else {
+        $parameters = @{}
+        if ($status.ComputerName -ne "localhost") {
             $parameters.ComputerName = $status.ComputerName
-            try {
-                if (-Not $(Test-Connection $status.ComputerName -count 1 -Quiet)) {
-                    $status.Status = "OFFLINE"
-                }
-            } catch {
+            if ($Credential) {
+                $parameters.Credential = $Credential
             }
         }
-        if ($status.Status -ne "OFFLINE") {
-            try {
-                $status.VolumeSerialNumber = (Invoke-Command @parameters { Get-CimInstance -ClassName Win32_Volume -Filter "name='C:\\'" }).SerialNumber
-                $status.EmotetProcessName = $(Get-EmotetProcessName $status.VolumeSerialNumber)
-                $process = (Invoke-Command @parameters { Get-CimInstance -ClassName Win32_Process -Filter "Name like '$($status.EmotetProcessName)%'" })
-                if ($process) {
-                    $status.EmotetProcessID = $process.Handle
-                    $status.EmotetPath = $process.ExecutablePath
-                    $status.Status = "DETECTED"
-                } else {
-                    $status.Status = "OK"
-                }
-            } catch {
+        try {
+            $status.VolumeSerialNumber = (Invoke-Command @parameters { Get-CimInstance -ClassName Win32_Volume -Filter "name='C:\\'" }).SerialNumber
+            $status.EmotetProcessName = $(Get-EmotetProcessName $status.VolumeSerialNumber)
+            $process = (Invoke-Command @parameters { Get-CimInstance -ClassName Win32_Process -Filter "Name like '$($status.EmotetProcessName)%'" })
+            if ($process) {
+                $status.EmotetProcessID = $process.Handle
+                $status.EmotetPath = $process.ExecutablePath
+                $status.Status = "DETECTED"
+            } else {
+                $status.Status = "OK"
+            }
+        } catch {
+            if (Test-Connection $status.ComputerName -count 1 -Quiet) {
                 $status.Status = "UNKNOWN"
+            } else {
+                $status.Status = "OFFLINE"
             }
         }
         $status

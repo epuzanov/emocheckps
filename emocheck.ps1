@@ -6,7 +6,7 @@
     This script is a PowerShell implementation of EmoCheck (https://github.com/JPCERTCC/EmoCheck)
 
 .NOTES
-    Version            : 1.0.2
+    Version            : 1.0.3
     Author             : Egor Puzanov
     Created on         : 2020-02-09
     License            : MIT License
@@ -106,15 +106,17 @@ Process {
             $VolumeSerialNumber
         )
         $seed = [UInt32]::MaxValue - [UInt32]$($VolumeSerialNumber / $keywords.length)
-        $keyword = $(Get-EmotetProcessWord $VolumeSerialNumber) + $(Get-EmotetProcessWord $seed)
+        $keyword = $(Get-EmotetProcessWord $VolumeSerialNumber) + $(Get-EmotetProcessWord $seed) + ".exe"
         return $keyword
     }
 
-    foreach($HostName in $ComputerName) {
+    ForEach($HostName in $ComputerName) {
         $status.ComputerName = $HostName
         $status.EmotetProcessID = $null
         $status.EmotetPath = $null
+        $status.Status = "OK"
         $parameters = @{}
+        $process_names = @()
         if ($status.ComputerName -ne "localhost") {
             $parameters.ComputerName = $status.ComputerName
             if ($Credential) {
@@ -122,15 +124,19 @@ Process {
             }
         }
         try {
-            $status.VolumeSerialNumber = (Invoke-Command @parameters { Get-CimInstance -ClassName Win32_Volume -Filter "name='C:\\'" }).SerialNumber
-            $status.EmotetProcessName = $(Get-EmotetProcessName $status.VolumeSerialNumber)
-            $process = (Invoke-Command @parameters { Get-CimInstance -ClassName Win32_Process -Filter "Name like '$($status.EmotetProcessName)%'" })
-            if ($process) {
-                $status.EmotetProcessID = $process.Handle
-                $status.EmotetPath = $process.ExecutablePath
-                $status.Status = "DETECTED"
-            } else {
-                $status.Status = "OK"
+            $SystemDrive = Invoke-Command -ErrorAction Stop @parameters { Get-CimInstance -ClassName Win32_OperatingSystem -Property SystemDrive | Select-Object -ExpandProperty SystemDrive}
+            $SystemDrive += "\\"
+            $status.VolumeSerialNumber = Invoke-Command -ErrorAction Stop @parameters { Get-CimInstance -ClassName Win32_Volume -Filter "Name='$SystemDrive'" -Property SerialNumber | Select-Object -ExpandProperty SerialNumber}
+            $process_names += $(Get-EmotetProcessName $status.VolumeSerialNumber)
+            ForEach($process_name in $process_names) {
+                $process = Invoke-Command -ErrorAction Stop @parameters { Get-CimInstance -ClassName Win32_Process -Filter "Name='$process_name'" -Property Handle,ExecutablePath }
+                $status.EmotetProcessName = $process_name
+                if ($process) {
+                    $status.EmotetProcessID = $process.Handle
+                    $status.EmotetPath = $process.ExecutablePath
+                    $status.Status = "DETECTED"
+                    break
+                }
             }
         } catch {
             if (Test-Connection $status.ComputerName -count 1 -Quiet) {

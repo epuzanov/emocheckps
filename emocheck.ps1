@@ -6,7 +6,7 @@
     This script is a PowerShell implementation of EmoCheck (https://github.com/JPCERTCC/EmoCheck)
 
 .NOTES
-    Version            : 1.0.3
+    Version            : 1.0.4
     Author             : Egor Puzanov
     Created on         : 2020-02-09
     License            : MIT License
@@ -78,6 +78,9 @@ Param (
 
 Begin {
     $keywords = "duck,mfidl,targets,ptr,khmer,purge,metrics,acc,inet,msra,symbol,driver,sidebar,restore,msg,volume,cards,shext,query,roam,etw,mexico,basic,url,createa,blb,pal,cors,send,devices,radio,bid,format,thrd,taskmgr,timeout,vmd,ctl,bta,shlp,avi,exce,dbt,pfx,rtp,edge,mult,clr,wmistr,ellipse,vol,cyan,ses,guid,wce,wmp,dvb,elem,channel,space,digital,pdeft,violet,thunk"
+    $reg_keys = $("HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer",
+        "HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer", 
+        "HKLM:\WOW6432Node\Software\Microsoft\Windows\CurrentVersion\Explorer")
     $status = New-Object PSObject
     $status | Add-Member NoteProperty ComputerName $null
     $status | Add-Member NoteProperty VolumeSerialNumber $null
@@ -110,13 +113,35 @@ Process {
         return $keyword
     }
 
+    function Get-DecodeEmotetProcessName {
+        Param (
+            [Parameter(Position=0)]
+            [Byte[]]
+            $xor_key,
+            [Parameter(Position=1)]
+            [Byte[]]
+            $reg_value
+        )
+        $filename = ""
+        For ($i=0; $i -lt $reg_value.Length; $i++) {
+            $decoded_char = $xor_key[($i % 4 - 3) * -1] -bxor $reg_value[$i]
+            if (0x20 -Lt $decoded_char -And $decoded_char -Lt 0x7e) {
+                $filename += [Char]$decoded_char
+            }
+        }
+        if ($filename.Length -gt 0) {
+            $filename += ".exe"
+        }
+        return $filename
+    }
+
     ForEach($HostName in $ComputerName) {
         $status.ComputerName = $HostName
         $status.EmotetProcessID = $null
         $status.EmotetPath = $null
         $status.Status = "OK"
         $parameters = @{}
-        $process_names = @()
+        [String[]]$process_names = @()
         if ($status.ComputerName -ne "localhost") {
             $parameters.ComputerName = $status.ComputerName
             if ($Credential) {
@@ -128,7 +153,14 @@ Process {
             $SystemDrive += "\\"
             $status.VolumeSerialNumber = Invoke-Command -ErrorAction Stop @parameters { Get-CimInstance -ClassName Win32_Volume -Filter "Name='$SystemDrive'" -Property SerialNumber | Select-Object -ExpandProperty SerialNumber}
             $process_names += $(Get-EmotetProcessName $status.VolumeSerialNumber)
+            $reg_value_name = '{0:X}' -f $VolumeSerialNumber
+            $xor_key = [Byte[]] -split ($reg_value_name -replace '..', '0x$& ')
+            ForEach ($reg_path in $reg_keys) {
+                $reg_value = Invoke-Command -ErrorAction Stop @parameters { Get-ItemProperty -ErrorAction SilentlyContinue -Path $reg_path -Name $reg_value_name | Select-Object -ExpandProperty $reg_value_name }
+                $process_names += $(Get-DecodeEmotetProcessName $xor_key $reg_value)
+            }
             ForEach($process_name in $process_names) {
+                if ($process_name.Lengthv -eq 0) {continue}
                 $process = Invoke-Command -ErrorAction Stop @parameters { Get-CimInstance -ClassName Win32_Process -Filter "Name='$process_name'" -Property Handle,ExecutablePath }
                 $status.EmotetProcessName = $process_name
                 if ($process) {

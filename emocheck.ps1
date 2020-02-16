@@ -6,7 +6,7 @@
     This script is a PowerShell implementation of EmoCheck (https://github.com/JPCERTCC/EmoCheck)
 
 .NOTES
-    Version            : 1.0.4
+    Version            : 1.0.5
     Author             : Egor Puzanov
     Created on         : 2020-02-09
     License            : MIT License
@@ -39,7 +39,7 @@
     host2        OK
 
 .EXAMPLE
-    PS> Get-ADComputer -Filter 'Name -like "dc*"' | Select Name | ./emocheck.ps1 | Select-Object -Property ComputerName,Status | Export-Csv -Path .\result.csv -NoTypeInformation
+    PS> Get-ADComputer -Filter 'Name -like "dc*"' | Select Name | ./emocheck.ps1 -CIMSessionOption $(New-CimSessionOption DCOM) | Select-Object -Property ComputerName,Status | Export-Csv -Path .\result.csv -NoTypeInformation
     PS> Get-Content -Path .\result.csv
     "ComputerName","Status"
     "dc001.domain.net","OK"
@@ -61,26 +61,31 @@
 .PARAMETER Credential
     Specifies a user account that has permission to perform this action.
     The default is the current user.
+
+.PARAMETER CIMSessionOption
+    Specifies a CIM Session Option. If empty PSRemoting will be used. The default is empty.
 #>
 
 Param (
-        [Parameter(Position=0)]
-        [PSCredential]
-        $Credential,
         [Parameter(
-            Position=1,
+            Position=0,
             ValueFromPipeline=$true,
             ValueFromPipelineByPropertyName=$true)
         ]
-        [String[]]
-        $ComputerName="localhost"
+        [System.String[]]
+        $ComputerName = "localhost",
+        [Parameter(Position=1)]
+        [System.Management.Automation.PSCredential]
+        $Credential,
+        [Parameter(Position=2)]
+        [Microsoft.Management.Infrastructure.Options.CimSessionOptions]
+        $CIMSessionOption
+
+
 )
 
 Begin {
     $keywords = "duck,mfidl,targets,ptr,khmer,purge,metrics,acc,inet,msra,symbol,driver,sidebar,restore,msg,volume,cards,shext,query,roam,etw,mexico,basic,url,createa,blb,pal,cors,send,devices,radio,bid,format,thrd,taskmgr,timeout,vmd,ctl,bta,shlp,avi,exce,dbt,pfx,rtp,edge,mult,clr,wmistr,ellipse,vol,cyan,ses,guid,wce,wmp,dvb,elem,channel,space,digital,pdeft,violet,thunk"
-    $reg_keys = $("HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer",
-        "HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer", 
-        "HKLM:\WOW6432Node\Software\Microsoft\Windows\CurrentVersion\Explorer")
     $status = New-Object PSObject
     $status | Add-Member NoteProperty ComputerName $null
     $status | Add-Member NoteProperty VolumeSerialNumber $null
@@ -94,7 +99,7 @@ Process {
     function Get-EmotetProcessWord {
         Param (
             [parameter(Position=0)]
-            [UInt32]
+            [System.UInt32]
             $seed
         )
         $ptr = $seed % $keywords.length
@@ -105,7 +110,7 @@ Process {
     function Get-EmotetProcessName {
         Param (
             [Parameter(Position=0)]
-            [UInt32]
+            [System.UInt32]
             $VolumeSerialNumber
         )
         $seed = [UInt32]::MaxValue - [UInt32]$($VolumeSerialNumber / $keywords.length)
@@ -116,15 +121,15 @@ Process {
     function Get-DecodeEmotetProcessName {
         Param (
             [Parameter(Position=0)]
-            [Byte[]]
+            [System.Byte[]]
             $xor_key,
             [Parameter(Position=1)]
-            [Byte[]]
+            [System.Byte[]]
             $reg_value
         )
         $filename = ""
         For ($i=0; $i -lt $reg_value.Length; $i++) {
-            $decoded_char = $xor_key[($i % 4 - 3) * -1] -bxor $reg_value[$i]
+            $decoded_char = $xor_key[$i % 4] -bxor $reg_value[$i]
             if (0x20 -Lt $decoded_char -And $decoded_char -Lt 0x7e) {
                 $filename += [Char]$decoded_char
             }
@@ -134,6 +139,43 @@ Process {
         }
         return $filename
     }
+    
+    $ValuesRequest_SB = {
+        Param (
+            [Parameter(Position=0)]
+            [Microsoft.Management.Infrastructure.CimSession]
+            $CimSession
+        )
+        $reg_keys = $("0x80000001:Software\Microsoft\Windows\CurrentVersion\Explorer",
+            "0x80000002:Software\Microsoft\Windows\CurrentVersion\Explorer", 
+            "0x80000002:WOW6432Node\Software\Microsoft\Windows\CurrentVersion\Explorer")
+        $results = @()
+        $SystemDrive = Get-CimInstance -CimSession $CimSession -Namespace 'root/cimv2' -ClassName Win32_OperatingSystem -Property SystemDrive | Select-Object -ExpandProperty SystemDrive
+        $SystemDrive += "\\"
+        $results += Get-CimInstance -CimSession $CimSession -Namespace 'root/cimv2' -ClassName Win32_Volume -Filter "Name='$SystemDrive'" -Property SerialNumber | Select-Object -ExpandProperty SerialNumber
+        $results += '{0:X}' -f $results[0]
+        $arguments = @{sValueName=$results[1]}
+        ForEach ($reg_key in $reg_keys) {
+            [System.UInt32]$arguments.hDefKey,[System.String]$arguments.sSubKeyName = $reg_key.Split(":")
+            $bs = Invoke-CimMethod -CimSession $CimSession -Namespace 'root/cimv2' -ClassName 'StdRegProv' -MethodName 'GetBinaryValue' -Arguments $arguments | Select-Object -ExpandProperty uValue
+            if ($bs -ne $null) {
+                $results += [System.BitConverter]::ToString($bs).Replace("-", "")
+            }
+        }
+        $results
+    }
+
+    $ProcessStatus_SB = {
+        Param (
+            [Parameter(Position=0)]
+            [Microsoft.Management.Infrastructure.CimSession]
+            $CimSession,
+            [Parameter(Position=1)]
+            [System.String]
+            $filter
+        )
+        Get-CimInstance -CimSession $CimSession -Namespace 'root/cimv2' -ClassName Win32_Process -Filter $filter -Property Name,Handle,ExecutablePath
+    }
 
     ForEach($HostName in $ComputerName) {
         $status.ComputerName = $HostName
@@ -141,34 +183,37 @@ Process {
         $status.EmotetPath = $null
         $status.Status = "OK"
         $parameters = @{}
-        [String[]]$process_names = @()
-        if ($status.ComputerName -ne "localhost") {
-            $parameters.ComputerName = $status.ComputerName
-            if ($Credential) {
-                $parameters.Credential = $Credential
-            }
-        }
+        $CimSession = New-CimSession
+        $process_names = [System.Collections.ArrayList]@()
         try {
-            $SystemDrive = Invoke-Command -ErrorAction Stop @parameters { Get-CimInstance -ClassName Win32_OperatingSystem -Property SystemDrive | Select-Object -ExpandProperty SystemDrive}
-            $SystemDrive += "\\"
-            $status.VolumeSerialNumber = Invoke-Command -ErrorAction Stop @parameters { Get-CimInstance -ClassName Win32_Volume -Filter "Name='$SystemDrive'" -Property SerialNumber | Select-Object -ExpandProperty SerialNumber}
-            $process_names += $(Get-EmotetProcessName $status.VolumeSerialNumber)
-            $reg_value_name = '{0:X}' -f $VolumeSerialNumber
-            $xor_key = [Byte[]] -split ($reg_value_name -replace '..', '0x$& ')
-            ForEach ($reg_path in $reg_keys) {
-                $reg_value = Invoke-Command -ErrorAction Stop @parameters { Get-ItemProperty -ErrorAction SilentlyContinue -Path $reg_path -Name $reg_value_name | Select-Object -ExpandProperty $reg_value_name }
-                $process_names += $(Get-DecodeEmotetProcessName $xor_key $reg_value)
-            }
-            ForEach($process_name in $process_names) {
-                if ($process_name.Lengthv -eq 0) {continue}
-                $process = Invoke-Command -ErrorAction Stop @parameters { Get-CimInstance -ClassName Win32_Process -Filter "Name='$process_name'" -Property Handle,ExecutablePath }
-                $status.EmotetProcessName = $process_name
-                if ($process) {
-                    $status.EmotetProcessID = $process.Handle
-                    $status.EmotetPath = $process.ExecutablePath
-                    $status.Status = "DETECTED"
-                    break
+            if ($status.ComputerName -ne "localhost") {
+                if ($CIMSessionOption -eq $null) {
+                    $parameters.ComputerName = $status.ComputerName
+                    if ($Credential) {
+                        $parameters.Credential = $Credential
+                    }
+                } else {
+                    $CimSession = New-CimSession -ErrorAction Stop -ComputerName $status.ComputerName -Credential $Credential -SessionOption $CIMSessionOption
                 }
+            }
+            $cim_results = [System.Collections.ArrayList]$(Invoke-Command -ErrorAction Stop -ArgumentList $CimSession -ScriptBlock $ValuesRequest_SB @parameters)
+            $status.VolumeSerialNumber = $cim_results[0]
+            $status.EmotetProcessName = $(Get-EmotetProcessName $status.VolumeSerialNumber)
+            $filter = "Name='" + $status.EmotetProcessName + "'"
+            $xor_key = [Byte[]] -split ($cim_results[1] -replace '..', '0x$& ')
+            $xor_key = @($xor_key[3], $xor_key[2], $xor_key[1], $xor_key[0])
+            $cim_results.RemoveAt(0)
+            $cim_results.RemoveAt(0)
+            ForEach ($reg_value in $cim_results) {
+                $filter += " OR Name='" + $(Get-DecodeEmotetProcessName $xor_key $([Byte[]] -split ($reg_value -replace '..', '0x$& '))) + "'"
+            }
+            $processes = Invoke-Command -ErrorAction Stop -ArgumentList $CimSession,$filter -ScriptBlock $ProcessStatus_SB @parameters
+            ForEach($process in $processes) {
+                $status.EmotetProcessName = $process.Name
+                $status.EmotetProcessID = $process.Handle
+                $status.EmotetPath = $process.ExecutablePath
+                $status.Status = "DETECTED"
+                break
             }
         } catch {
             if (Test-Connection $status.ComputerName -count 1 -Quiet) {
